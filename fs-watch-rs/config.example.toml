@@ -1,0 +1,11 @@
+watch_path  = "./src"
+recursive   = true
+debounce_ms = 300
+filters     = [".rs", ".toml"]
+
+[output]
+file        = "./watch.log"
+
+[webhook]
+url         = "https://hooks.example.com/notify"
+timeout_sec = 5

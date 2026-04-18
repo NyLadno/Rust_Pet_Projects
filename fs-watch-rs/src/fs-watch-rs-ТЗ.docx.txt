@@ -1,0 +1,510 @@
+﻿ТЕХНИЧЕСКОЕ ЗАДАНИЕ
+fs-watch-rs
+CLI-инструмент мониторинга файловой системы
+
+
+Статус: DRAFT v1.0
+	Язык: Rust 2024
+	Уровень: Junior
+	
+
+Апрель 2026  •  Pet-проект  •  Portfolio
+
+
+
+
+
+
+1. Общая информация
+Название проекта
+	fs-watch-rs
+	Тип
+	CLI-инструмент (системное программирование)
+	Язык разработки
+	Rust (edition 2024)
+	Целевые ОС
+	Linux, macOS (Windows — опционально)
+	Назначение документа
+	Техническое задание для самостоятельной разработки pet-проекта
+	Версия документа
+	1.0 DRAFT
+	Дата создания
+	Апрель 2026
+	
+
+1.1 Описание продукта
+fs-watch-rs — это кроссплатформенная CLI-утилита для мониторинга файловой системы в реальном времени. Инструмент наблюдает за указанной директорией, фиксирует все изменения (создание, изменение, удаление файлов), фильтрует события по заданным критериям и доставляет уведомления через настраиваемые каналы вывода.
+
+
+Аналоги: inotifywait (Linux), fswatch (macOS), watchman (Facebook). fs-watch-rs отличается единым конфиг-файлом, поддержкой webhook-уведомлений и расширяемой архитектурой репортеров.
+
+
+1.2 Цели проекта
+* Бизнес-цель: создать утилиту, пригодную для DevOps/мониторинга продакшн-директорий
+* Учебная цель: освоить ключевые концепции Rust на практическом проекте
+* Портфолио-цель: продемонстрировать знание системного программирования на Rust работодателям
+
+
+2. Функциональные требования
+Приоритеты: Must — обязательно для MVP | Should — желательно | Could — расширение
+
+
+ID
+	Требование
+	Приоритет
+	Итерация
+	FR-01
+	Наблюдение за указанной директорией (рекурсивно и нерекурсивно)
+	Must
+	1
+	FR-02
+	Обнаружение событий: Created, Modified, Deleted, Renamed
+	Must
+	1
+	FR-03
+	Вывод событий в stdout с временной меткой
+	Must
+	1
+	FR-04
+	Фильтрация по расширению файла (--filter .rs,.toml)
+	Must
+	1
+	FR-05
+	Фильтрация по паттерну имени файла (glob: --pattern '*.log')
+	Must
+	2
+	FR-06
+	Запись событий в лог-файл (--output ./watch.log)
+	Should
+	2
+	FR-07
+	Чтение конфигурации из config.toml
+	Should
+	2
+	FR-08
+	Отправка HTTP POST webhook при событии
+	Should
+	3
+	FR-09
+	Дебаунсинг событий (--debounce 500ms)
+	Should
+	3
+	FR-10
+	Цветной вывод в терминале с иконками событий
+	Could
+	2
+	FR-11
+	Сводная статистика по завершении (Ctrl+C)
+	Could
+	3
+	FR-12
+	Поддержка нескольких наблюдаемых директорий
+	Could
+	4
+	
+
+3. Нефункциональные требования
+3.1 Производительность
+* Задержка обнаружения события: не более 100 мс от момента изменения
+* Потребление памяти: не более 20 МБ в режиме ожидания
+* Утилита не должна создавать заметной нагрузки на CPU в idle
+
+
+3.2 Надёжность
+* Корректная обработка ошибок: несуществующая директория — информативное сообщение, не panic
+* Корректное завершение по Ctrl+C (graceful shutdown)
+* Недоступность webhook не должна прерывать основной мониторинг
+
+
+3.3 Качество кода
+* Без предупреждений компилятора (cargo build --release без warnings)
+* Покрытие юнит-тестами: минимум 3 теста для логики парсинга событий
+* Документирование публичных структур и трейтов (cargo doc)
+* Форматирование: cargo fmt перед каждым коммитом
+* Линтер: cargo clippy без ошибок уровня deny
+
+
+4. Архитектура и структура проекта
+4.1 Структура директорий
+fs-watch-rs/
+├── Cargo.toml
+├── Cargo.lock
+├── README.md
+├── config.example.toml     # пример конфиг-файла
+├── src/
+│   ├── main.rs             # точка входа, CLI-парсинг, запуск
+│   ├── cli.rs              # структуры аргументов (clap)
+│   ├── config.rs           # структура Config + десериализация
+│   ├── watcher.rs          # логика наблюдения (notify)
+│   ├── event.rs            # тип WatchEvent, фильтрация
+│   ├── reporter/
+│   │   ├── mod.rs          # трейт Reporter
+│   │   ├── console.rs      # ConsoleReporter
+│   │   ├── file.rs         # FileReporter
+│   │   └── webhook.rs      # WebhookReporter (async)
+│   └── errors.rs           # AppError (thiserror)
+└── tests/
+    └── event_tests.rs      # интеграционные тесты
+
+
+4.2 Ключевые типы и трейты
+Трейт Reporter
+pub trait Reporter: Send + Sync {
+    fn report(&self, event: &WatchEvent) -> Result<(), AppError>;
+    fn flush(&self) -> Result<(), AppError> { Ok(()) }
+}
+
+
+Тип WatchEvent
+pub struct WatchEvent {
+    pub kind:      EventKind,       // Created | Modified | Deleted | Renamed
+    pub path:      PathBuf,
+    pub timestamp: DateTime<Local>,
+}
+ 
+pub enum EventKind {
+    Created,
+    Modified,
+    Deleted,
+    Renamed { from: PathBuf },
+}
+
+
+Структура Config
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub watch_path:  PathBuf,
+    pub recursive:   bool,
+    pub filters:     Vec<String>,    // расширения
+    pub output_file: Option<PathBuf>,
+    pub webhook_url: Option<String>,
+    pub debounce_ms: u64,
+}
+
+
+5. Технический стек
+5.1 Зависимости (Cargo.toml)
+Крейт
+	Версия
+	Назначение
+	notify
+	6.*
+	Кроссплатформенный watcher файловой системы (inotify/kqueue)
+	clap
+	4.* (derive)
+	Парсинг CLI-аргументов через derive-макросы
+	serde
+	1.* (derive)
+	Сериализация/десериализация структур данных
+	toml
+	0.8.*
+	Парсинг конфиг-файла config.toml
+	chrono
+	0.4.*
+	Временные метки событий с форматированием
+	tokio
+	1.* (rt, macros)
+	Async runtime для webhook-запросов
+	reqwest
+	0.12.*
+	HTTP-клиент для отправки webhook (async)
+	colored
+	2.*
+	Цветной вывод в терминале (ANSI-коды)
+	thiserror
+	1.*
+	Удобное создание кастомных типов ошибок
+	glob
+	0.3.*
+	Сопоставление имён файлов по паттерну
+	
+
+5.2 Dev-зависимости
+Крейт
+	Версия
+	Назначение
+	tempfile
+	3.*
+	Временные файлы и директории в тестах
+	mockito
+	1.*
+	Мок HTTP-сервера для тестирования webhook
+	
+
+6. CLI-интерфейс
+6.1 Синтаксис вызова
+fs-watch-rs [OPTIONS] <PATH>
+ 
+Arguments:
+  <PATH>  Путь к наблюдаемой директории
+ 
+Options:
+  -r, --recursive              Наблюдать рекурсивно [default: false]
+  -f, --filter <EXT>           Фильтр по расширению (.rs, .toml, ...)
+  -p, --pattern <GLOB>         Фильтр по glob-паттерну (*.log, src_*)
+  -o, --output <FILE>          Путь к файлу лога
+  -c, --config <FILE>          Путь к config.toml
+      --webhook <URL>          URL для POST-уведомлений
+      --debounce <MS>          Дебаунс событий в мс [default: 200]
+      --no-color               Отключить цветной вывод
+  -h, --help                   Показать справку
+  -V, --version                Показать версию
+
+
+6.2 Примеры использования
+# Простой мониторинг директории
+fs-watch-rs ./src
+ 
+# Рекурсивно, только .rs файлы
+fs-watch-rs ./project --recursive --filter .rs
+ 
+# С записью в файл и webhook
+fs-watch-rs ./logs -r --output events.log --webhook http://localhost:8080/hook
+ 
+# С конфиг-файлом
+fs-watch-rs --config ./config.toml .
+
+
+6.3 Формат конфиг-файла (config.toml)
+watch_path  = "./src"
+recursive   = true
+debounce_ms = 300
+filters     = [".rs", ".toml"]
+ 
+[output]
+file        = "./watch.log"
+ 
+[webhook]
+url         = "https://hooks.example.com/notify"
+timeout_sec = 5
+
+
+7. Форматы вывода
+7.1 Консольный вывод
+Формат строки: [TIMESTAMP] [ICON] [EVENT_KIND]  PATH
+
+
+[2026-04-13 14:32:01] ✚ CREATED   src/main.rs
+[2026-04-13 14:32:45] ✎ MODIFIED  src/event.rs
+[2026-04-13 14:33:10] ✖ DELETED   target/debug/fs-watch-rs
+[2026-04-13 14:33:22] ⇄ RENAMED   src/old.rs -> src/new.rs
+
+
+Событие
+	Иконка
+	Цвет
+	Описание
+	Created
+	✚
+	Зелёный
+	Файл создан
+	Modified
+	✎
+	Жёлтый
+	Файл изменён
+	Deleted
+	✖
+	Красный
+	Файл удалён
+	Renamed
+	⇄
+	Синий
+	Файл переименован
+	
+
+7.2 Webhook payload (JSON)
+{
+  "event":     "Modified",
+  "path":      "/home/user/project/src/main.rs",
+  "timestamp": "2026-04-13T14:32:45+03:00",
+  "extension": ".rs"
+}
+
+
+8. План реализации (MVP)
+Подход: итеративная разработка. Каждая итерация — рабочий, запускаемый бинарник.
+
+
+Итерация 1: Скелет проекта и CLI  ⏱ 2–3 дня
+* cargo new fs-watch-rs --bin, настройка Cargo.toml с зависимостями
+* Структуры Cli через clap (derive): поля path, recursive, filter, output
+* main.rs: парсинг аргументов, вывод в stdout для проверки
+* Модуль errors.rs с AppError через thiserror
+* Что изучишь: derive-макросы, Result<T,E>, базовая структура проекта
+	
+
+Итерация 2: Базовый watcher и события  ⏱ 3–4 дня
+* Модуль event.rs: тип WatchEvent, enum EventKind с полями
+* Модуль watcher.rs: подключение notify, цикл обработки событий через match
+* Маппинг событий notify -> WatchEvent (конвертация через From/Into)
+* Вывод событий в stdout с временной меткой (chrono)
+* Что изучишь: enum + pattern matching, From/Into трейты, работа с внешним крейтом
+	
+
+Итерация 3: Фильтрация и трейт Reporter  ⏱ 3–4 дня
+* Логика фильтрации: по расширению (--filter) и glob-паттерну (--pattern)
+* Трейт Reporter с методом report(&self, event: &WatchEvent) -> Result<()>
+* ConsoleReporter: цветной вывод через colored
+* FileReporter: запись в файл через BufWriter
+* Что изучишь: трейты, trait objects (Box<dyn Reporter>), BufWriter, ownership при передаче в функции
+	
+
+Итерация 4: Конфиг-файл  ⏱ 2–3 дня
+* Структура Config с #[derive(Deserialize)]
+* Загрузка config.toml через toml::from_str
+* Слияние: аргументы CLI имеют приоритет над config.toml
+* Валидация Config: существует ли директория, корректны ли расширения
+* Что изучишь: serde Deserialize, Option<T>, обработка вложенных структур
+	
+
+Итерация 5: Webhook (async)  ⏱ 3–4 дня
+* WebhookReporter: отправка POST JSON через reqwest + tokio
+* #[tokio::main] в main.rs или spawn для webhook в отдельном потоке
+* Таймаут webhook-запроса: 5 секунд, ошибка не прерывает мониторинг
+* Дебаунсинг: события в течение debounce_ms объединяются в одно
+* Что изучишь: async/await, tokio::spawn, Arc для shared state, обработка ошибок в async
+	
+
+Итерация 6: Тесты, документация, README  ⏱ 2–3 дня
+* Юнит-тесты: фильтрация событий, парсинг расширений, конвертация EventKind
+* cargo doc: doc-комментарии /// для публичных типов и трейтов
+* README.md: описание, установка, примеры с GIF/скриншотами
+* Итоговые проверки: cargo fmt, cargo clippy, cargo test
+* Что изучишь: #[cfg(test)], assert_eq!, tempfile для тестов файловой системы
+	
+
+8.1 Ориентировочные сроки
+Итерация
+	Название
+	Дней
+	Результат
+	1
+	Скелет + CLI
+	2–3
+	cargo run -- --help работает
+	2
+	Watcher + события
+	3–4
+	События выводятся в терминал
+	3
+	Фильтрация + Reporter
+	3–4
+	Фильтры работают, лог пишется
+	4
+	Config.toml
+	2–3
+	Конфиг читается и применяется
+	5
+	Webhook + async
+	3–4
+	Webhook отправляется
+	6
+	Тесты + README
+	2–3
+	Проект готов для портфолио
+	
+
+9. Концепции Rust по итерациям
+Этот раздел — твоя учебная карта. После каждой итерации отмечай освоенные концепции.
+
+
+Итер.
+	Концепция
+	Где применяется
+	1
+	Ownership & Move
+	Передача PathBuf в WatchEvent
+	1
+	Result<T, E>
+	Возврат ошибок из всех функций
+	1
+	Derive-макросы
+	clap::Parser, Debug, Clone на Cli
+	2
+	Enum + Match
+	EventKind: Created / Modified / Deleted
+	2
+	From / Into
+	Конвертация notify::Event -> WatchEvent
+	2
+	Borrowing (&)
+	Передача &WatchEvent в reporter
+	3
+	Traits
+	Reporter трейт с двумя реализациями
+	3
+	Box<dyn Trait>
+	Вектор репортеров разных типов
+	3
+	impl Trait
+	Возврат итератора из фильтра
+	4
+	Serde Deserialize
+	Чтение config.toml в структуру Config
+	4
+	Option<T>
+	Необязательные поля конфига
+	4
+	Lifetimes (базово)
+	Ссылки в функциях конфига
+	5
+	async / await
+	WebhookReporter::report() — async fn
+	5
+	Arc<T>
+	Разделяемый Config между потоками
+	5
+	tokio::spawn
+	Отправка webhook в фоне
+	6
+	#[cfg(test)]
+	Юнит-тесты в модулях
+	6
+	cargo doc
+	/// doc-комментарии на публичных типах
+	
+
+10. Критерии готовности (Definition of Done)
+10.1 MVP (минимально готовый продукт)
+* cargo build --release завершается без ошибок и предупреждений
+* cargo test — все тесты проходят
+* cargo clippy — нет ошибок уровня deny
+* Базовый сценарий работает: fs-watch-rs ./src --recursive --filter .rs
+* ConsoleReporter и FileReporter реализованы и работают
+
+
+10.2 Готово для портфолио
+* README.md: описание, установка через cargo install, примеры с терминальным выводом
+* config.example.toml присутствует в репозитории
+* Минимум 3 юнит-теста с содержательными проверками
+* Публичные типы и трейты задокументированы (cargo doc без ошибок)
+* WebhookReporter реализован и протестирован
+* Репозиторий на GitHub, описание в профиле
+
+
+10.3 Checklist перед каждым коммитом
+1. cargo fmt
+2. cargo clippy
+3. cargo test
+4. Ручная проверка основного сценария
+
+
+11. Учебные ресурсы
+По ходу разработки — читать по мере необходимости
+* The Rust Book, гл. 4–6: ownership, structs, enums — перед итерацией 1–2
+* The Rust Book, гл. 10: traits и generics — перед итерацией 3
+* The Rust Book, гл. 9: обработка ошибок — перед итерацией 1
+* Tokio Tutorial (tokio.rs): Getting Started — перед итерацией 5
+* docs.rs/notify: документация крейта — перед итерацией 2
+* docs.rs/clap: derive tutorial — перед итерацией 1
+* docs.rs/serde: derive + toml — перед итерацией 4
+
+
+Принцип работы: не читай главы заранее. Начни кодить, встреть проблему с borrow checker — открой главу 4. Встреть вопрос о трейтах — открой главу 10. Rust лучше учится через ошибки компилятора, а не через чтение.
+
+
+
+
+
+
+fs-watch-rs  •  ТЗ v1.0  •  Апрель 2026
